@@ -1,33 +1,40 @@
-
 ------------------------------------------------------------
--- YouTube Skip (one-shot click in your *normal* Safari tab)
--- Hotkey: Ctrl+Alt+Cmd+Y  → arm/disarm
--- Arm shows: "SEARCHING FOR SKIP" (notification + toast)
--- On successful click: "HAMMER TIME" then "CLICKED" (toasts), auto-disarm
--- Local HTTP:
---   GET http://127.0.0.1:8777/yt-status           -> enabled|disabled
---   GET http://127.0.0.1:8777/yt-url              -> current Safari URL (debug)
---   GET http://127.0.0.1:8777/yt-debug            -> JSON {armed, frontApp, url, frame}
---   GET http://127.0.0.1:8777/yt-skip?x=..&y=..   -> click (CSS px in viewport)
+-- YouTube Skipper (remote arm + one-shot click)
+-- HTTP:
+--   GET /yt-status
+--   GET /yt-url
+--   GET /yt-debug
+--   GET /yt-arm?token=...
+--   GET /yt-disarm?token=...
+--   GET /yt-skip?x=..&y=..   -> on success: toast "AD HAMMERED" (2s)
+--                               on failure: toast "SAD HAMMER: <reason>" (2s)
 ------------------------------------------------------------
-
 local YT_PORT = 8777
-local ytSkipperEnabled = false   -- one-shot armed state
-local ytLastClickAt = 0          -- 1s cooldown
-local jitter = 2                 -- px jitter on click
+local ytSkipperEnabled = false
+local ytLastClickAt = 0
+local jitter = 2
 local hyperLocal = hyper or {"ctrl","alt","cmd"}
 
--- helpers
-local function toast(msg, dur) hs.alert.show(msg, dur or 1) end
+-- Option 3 (remote arm)
+local ALLOW_REMOTE_ARM = true
+local ARM_TOKEN = "REPLACE_WITH_LONG_RANDOM_SECRET"
+
+local function toast(msg, dur) hs.alert.show(msg, dur or 2) end
 local function notifyBoth(title, text, seconds)
   hs.notify.new({ title = title, informativeText = text, withdrawAfter = seconds or 2 }):send()
-  toast(text, (seconds or 2) * 0.9)
+  hs.alert.show(text, (seconds or 2) * 0.9)
   print(string.format("[yt-skip] %s: %s", title, text))
 end
 
--- Returns the front Safari tab URL (native first, JS fallback)
+-- Safari helpers
+local function frontAppName()
+  local win = hs.window.frontmostWindow()
+  if not win then return "" end
+  local app = win:application()
+  return app and app:name() or ""
+end
+
 local function currentSafariURL()
-  -- native property (no JS permission needed)
   local ok, out = hs.osascript.applescript([[
     tell application "Safari"
       if (count of windows) = 0 then return ""
@@ -39,8 +46,6 @@ local function currentSafariURL()
     end tell
   ]])
   local url = (ok and out) or ""
-
-  -- JS fallback (requires Safari → Develop → Allow JavaScript from Apple Events)
   if url == "" then
     local ok2, jsOut = hs.osascript.applescript([[
       tell application "Safari"
@@ -54,136 +59,102 @@ local function currentSafariURL()
     ]])
     url = (ok2 and jsOut) or ""
   end
-
   print("[yt-skip] front Safari URL:", url)
   return url
 end
 
--- Accept any *.youtube.com and youtu.be (robust to :port)
 local function isYouTubeURL(u)
   if not u or u == "" then return false, "(empty)" end
-  local hostport = u:match("^%w+://([^/]+)") or ""    -- scheme://host[:port]
-  local host = hostport:lower():match("^[^:]+") or "" -- strip :port if present
+  local hostport = u:match("^%w+://([^/]+)") or ""
+  local host = hostport:lower():match("^[^:]+") or ""
   local ok = (host == "youtu.be") or (host:sub(-11) == "youtube.com")
   return ok, host
 end
 
--- Frontmost app name
-local function frontAppName()
-  local win = hs.window.frontmostWindow()
-  if not win then return "" end
-  local app = win:application()
-  return app and app:name() or ""
-end
-
--- Safari AXWebArea frame (screen coords)
 local function safariWebAreaFrame()
   local win = hs.window.frontmostWindow()
   if not win then return nil end
   local app = win:application()
   if not app or app:name() ~= "Safari" then return nil end
-  local axwin = hs.axuielement.windowElement(win)
-  if not axwin then return nil end
-
+  local axwin = hs.axuielement.windowElement(win); if not axwin then return nil end
   local function findWebArea(ax)
     if not ax then return nil end
     if ax:attributeValue("AXRole") == "AXWebArea" then return ax end
-    local kids = ax:attributeValue("AXChildren") or {}
-    for _, child in ipairs(kids) do
-      local got = findWebArea(child)
-      if got then return got end
+    for _, child in ipairs(ax:attributeValue("AXChildren") or {}) do
+      local got = findWebArea(child); if got then return got end
     end
     return nil
   end
-
-  local web = findWebArea(axwin)
-  if not web then return nil end
-  return web:attributeValue("AXFrame") -- {x=, y=, w=, h=}
+  local web = findWebArea(axwin); if not web then return nil end
+  return web:attributeValue("AXFrame")
 end
 
--- URL-decode (basic)
-local function urldecode(s)
-  if not s then return s end
-  s = s:gsub("+", " ")
-  s = s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h,16)) end)
-  return s
-end
+-- url parsing
+local function urldecode(s) if not s then return s end s=s:gsub("+"," "); s=s:gsub("%%(%x%x)",function(h) return string.char(tonumber(h,16)) end); return s end
+local function parseQuery(q) local t={}; for k,v in string.gmatch(q or "", "([%w_%-]+)=([^&]+)") do t[k]=tonumber(v) or urldecode(v) end return t end
 
--- Parse query string into table
-local function parseQuery(q)
-  local t = {}
-  for k,v in string.gmatch(q or "", "([%w_]+)=([^&]+)") do
-    t[k] = tonumber(v) or urldecode(v)
-  end
-  return t
-end
-
--- Perform one trusted OS-level click at given viewport coords (x,y)
--- RETURNS: (status_number, body_string, content_type_string)
+-- do one trusted click
 local function doOneClick(params)
-  if not ytSkipperEnabled then return 403, "disabled", "text/plain" end
-  if os.time() - ytLastClickAt < 1 then return 429, "cooldown", "text/plain" end
+  if not ytSkipperEnabled then toast("SAD HAMMER: disabled", 2); return 403, "disabled", "text/plain" end
+  if os.time() - ytLastClickAt < 1 then toast("SAD HAMMER: cooldown", 2); return 429, "cooldown", "text/plain" end
 
   local appName = frontAppName()
   if appName ~= "Safari" then
-    return 400, "front app not Safari ("..appName..")", "text/plain"
+    local msg = "front app not Safari ("..appName..")"
+    toast("SAD HAMMER: "..msg, 2); return 400, msg, "text/plain"
   end
 
   local url = currentSafariURL()
   local okYT, host = isYouTubeURL(url)
   if not okYT then
-    return 400, "not youtube (url="..(url or "")..", host="..(host or "")..")", "text/plain"
+    local msg = "not youtube (url="..(url or "")..", host="..(host or "")..")"
+    toast("SAD HAMMER: "..msg, 2); return 400, msg, "text/plain"
   end
 
   local frame = safariWebAreaFrame()
-  if not frame then return 400, "no web area", "text/plain" end
+  if not frame then toast("SAD HAMMER: no web area", 2); return 400, "no web area", "text/plain" end
 
   local x = tonumber(params.x); local y = tonumber(params.y)
-  if not x or not y then return 400, "bad coords", "text/plain" end
+  if not x or not y then toast("SAD HAMMER: bad coords", 2); return 400, "bad coords", "text/plain" end
 
   local sx = frame.x + x + math.random(-jitter, jitter)
   local sy = frame.y + y + math.random(-jitter, jitter)
-
   if sx < frame.x or sx > (frame.x + frame.w) or sy < frame.y or sy > (frame.y + frame.h) then
-    return 400, string.format(
-      "out of bounds (sx=%.1f, sy=%.1f, frame=%d,%d,%d,%d)",
-      sx, sy, frame.x, frame.y, frame.w, frame.h
-    ), "text/plain"
+    local msg = string.format("out of bounds (sx=%.1f, sy=%.1f, frame=%d,%d,%d,%d)", sx, sy, frame.x, frame.y, frame.w, frame.h)
+    toast("SAD HAMMER: "..msg, 2); return 400, msg, "text/plain"
   end
 
-  -- real, trusted click
-  toast("HAMMER TIME", 1)            -- <<< requested toast
+  -- click!
   hs.eventtap.leftClick({ x = sx, y = sy })
 
   ytLastClickAt = os.time()
   ytSkipperEnabled = false
-  notifyBoth("YouTube Skipper", "CLICKED", 2)
+  hs.alert.show("AD HAMMERED ;)", 3)  -- success toast
   return 200, "ok", "text/plain"
 end
 
--- Local HTTP server (return order: body, status, headers)
+-- HTTP server
 if ytServer then ytServer:stop() end
 ytServer = hs.httpserver.new(false, true)
 ytServer:setPort(YT_PORT)
 ytServer:setCallback(function(method, path, headers, body)
   if method ~= "GET" then
-    return "method not allowed", 405, { ["Content-Type"] = "text/plain" }
-  end
+    return "method not allowed", 405, {["Content-Type"]="text/plain"} end
 
   local route, query = path:match("^/?([^%?]*)%??(.*)$")
   local params = parseQuery(query or "")
 
   if route == "yt-skip" then
     local status, text, ctype = doOneClick(params)
-    return text, status, { ["Content-Type"] = ctype }
+    return text, status, {["Content-Type"]=ctype}
 
   elseif route == "yt-status" then
     local state = ytSkipperEnabled and "enabled" or "disabled"
-    return state, 200, { ["Content-Type"] = "text/plain" }
+    return state, 200, {["Content-Type"]="text/plain"}
 
   elseif route == "yt-url" then
     local url = currentSafariURL() or ""
-    return url, 200, { ["Content-Type"] = "text/plain" }
+    return url, 200, {["Content-Type"]="text/plain"}
 
   elseif route == "yt-debug" then
     local frame = safariWebAreaFrame()
@@ -193,20 +164,30 @@ ytServer:setCallback(function(method, path, headers, body)
       url = currentSafariURL() or "",
       frame = frame and {x=frame.x, y=frame.y, w=frame.w, h=frame.h} or nil
     }
-    return hs.json.encode(dbg), 200, { ["Content-Type"] = "application/json" }
+    return hs.json.encode(dbg), 200, {["Content-Type"]="application/json"}
+
+  elseif route == "yt-arm" then
+    if not ALLOW_REMOTE_ARM then return "forbidden", 403, {["Content-Type"]="text/plain"} end
+    local token = params.token or headers["token"]; if token ~= ARM_TOKEN then return "unauthorized", 401, {["Content-Type"]="text/plain"} end
+    ytSkipperEnabled = true
+    -- hs.alert.show("YT SKIPPER: ON", 3)
+    return "enabled", 200, {["Content-Type"]="text/plain"}
+
+  elseif route == "yt-disarm" then
+    if not ALLOW_REMOTE_ARM then return "forbidden", 403, {["Content-Type"]="text/plain"} end
+    local token = params.token or headers["token"]; if token ~= ARM_TOKEN then return "unauthorized", 401, {["Content-Type"]="text/plain"} end
+    ytSkipperEnabled = false
+    -- hs.alert.show("YT SKIPPER: OFF", 2)
+    return "disabled", 200, {["Content-Type"]="text/plain"}
 
   else
-    return "not found", 404, { ["Content-Type"] = "text/plain" }
+    return "not found", 404, {["Content-Type"]="text/plain"}
   end
 end)
 ytServer:start()
 
--- Hotkey: arm/disarm (one-shot)
+-- Manual arm/disarm hotkey (optional)
 hs.hotkey.bind(hyperLocal, "Y", function()
   ytSkipperEnabled = not ytSkipperEnabled
-  if ytSkipperEnabled then
-    notifyBoth("YouTube Skipper", "SEARCHING FOR SKIP", 3)
-  else
-    notifyBoth("YouTube Skipper", "OFF", 2)
-  end
+  hs.alert.show(ytSkipperEnabled and "YT SKIPPER: ON" or "YT SKIPPER:OFF", ytSkipperEnabled and 3 or 2)
 end)
