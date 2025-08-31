@@ -1,4 +1,37 @@
 ------------------------------------------------------------
+-- AX hover-to-focus (yours)
+------------------------------------------------------------
+hs.window.animationDuration = 0
+hs.alert.show("AX hover-to-focus (persistent) loaded", 1)
+
+local lastWin = nil
+focusTimer = hs.timer.doEvery(0.05, function()
+  local pos = hs.mouse.absolutePosition()
+  local ax  = hs.axuielement.systemElementAtPosition(pos)
+  if not ax then return end
+  local axWinEl = ax:attributeValue("AXWindow") or ax
+  local win     = axWinEl:asHSWindow()
+  if win and win ~= lastWin then win:focus(); lastWin = win end
+end)
+focusTimer:start()
+
+hs.hotkey.bind({"ctrl","alt","cmd"}, "H", function()
+  if focusTimer:running() then focusTimer:stop(); hs.alert.show("hover-to-focus OFF", 1)
+  else focusTimer:start(); hs.alert.show("hover-to-focus ON", 1) end
+end)
+
+------------------------------------------------------------
+-- App launcher hotkeys (Ctrl+Alt+Cmd + key)
+------------------------------------------------------------
+local hyper = {"ctrl","alt","cmd"}
+local appMap = { m="Spotify", b="Blender", s="Safari", g="System Settings",
+                 w="WhatsApp", v="Visual Studio Code", t="Todoist",
+                 f="Finder", x="Terminal", n="Notion" }
+for key, appName in pairs(appMap) do
+  hs.hotkey.bind(hyper, key, function() hs.application.launchOrFocus(appName) end)
+end
+
+------------------------------------------------------------
 -- YouTube Skipper (remote arm + one-shot click)
 -- HTTP:
 --   GET /yt-status
