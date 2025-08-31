@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YT ad blocker
+// @name         YT ad blocker (remote-arm HS, minimal toast)
 // @namespace    https://example.com
-// @version      2.1
-// @description  Fast-forward during ads; restore speed; robust skip detection; auto-arm Hammerspoon -> click -> disarm. Only one toast: "HAMMERING AD" (cherry red, 4s).
+// @version      2.2
+// @description  Fast-forward during ads; restore speed; robust skip detection; auto-arm Hammerspoon -> click -> disarm. Only one toast: "HAMMERING AD" (cherry red, 4s). Also force-hide .style-scope.ytd-ad-slot-renderer and related ad slots.
 // @match        https://www.youtube.com/*
 // @run-at       document-idle
 // @grant        none
@@ -12,7 +12,7 @@
   "use strict";
 
   // ===== CONFIG =====
-  const AD_SPEED = 100.0;
+  const AD_SPEED = 100.0; // your chosen turbo rate
   const POLL_MS = 150;
   const VERIFY_MS = 1500;
   const RETRY_COOLDOWN = 1200;
@@ -73,7 +73,6 @@
   let hammerToastEl = null,
     hammerToastTimer = null;
   function showHammerToast() {
-    // create once
     if (!hammerToastEl) {
       hammerToastEl = document.createElement("div");
       Object.assign(hammerToastEl.style, {
@@ -102,22 +101,47 @@
     }, 4000);
   }
 
-  // ===== FEED/GRID AD HIDE =====
-  (function injectHasCSS() {
+  // ===== FEED/GRID AD HIDE (CSS + JS backup) =====
+  (function injectHideCSS() {
     const css = `
+      /* Force-hide all ad slot containers (requested class + related) */
+      .style-scope.ytd-ad-slot-renderer,
+      ytd-ad-slot-renderer,
+      ytd-in-feed-ad-layout-renderer,
+      .ytd-in-feed-ad-layout-renderer,
+      #player-ads {
+        display: none !important;
+      }
+
+      /* Also keep cards that contain ad slots out of the grid (fast path) */
       ytd-rich-item-renderer:has(ytd-ad-slot-renderer),
-      ytd-rich-item-renderer:has(ytd-in-feed-ad-layout-renderer){display:none!important;}
-      #player-ads{display:none!important;}
+      ytd-rich-item-renderer:has(ytd-in-feed-ad-layout-renderer){
+        display: none !important;
+      }
     `;
     const style = document.createElement("style");
     style.textContent = css;
     document.documentElement.appendChild(style);
   })();
-  const SELECTOR_CARD = "ytd-rich-item-renderer",
-    SELECTOR_AD = "ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer";
-  function hideAdCards(root = document) {
-    const pa = document.getElementById("player-ads");
-    if (pa) pa.style.display = "none";
+
+  // Full list to hide directly (backup for CSS)
+  const HIDE_SEL = [
+    ".style-scope.ytd-ad-slot-renderer",
+    "ytd-ad-slot-renderer",
+    "ytd-in-feed-ad-layout-renderer",
+    ".ytd-in-feed-ad-layout-renderer",
+    "#player-ads",
+  ].join(",");
+
+  const SELECTOR_CARD = "ytd-rich-item-renderer";
+  const SELECTOR_AD = "ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer";
+
+  function hideAdStuff(root = document) {
+    // Hide direct ad nodes
+    root.querySelectorAll(HIDE_SEL).forEach((el) => {
+      if (el && el.style.display !== "none") el.style.display = "none";
+    });
+    // Hide entire cards that contain ad nodes
     root.querySelectorAll(SELECTOR_CARD).forEach((card) => {
       if (card.__ytAdHidden) return;
       if (card.querySelector(SELECTOR_AD)) {
@@ -126,28 +150,28 @@
       }
     });
   }
+
   function observeFeed() {
     const target =
       document.querySelector("ytd-rich-grid-renderer") ||
       document.querySelector("ytd-browse") ||
       document.body;
+
     const mo = new MutationObserver((muts) => {
       for (const m of muts)
         for (const n of m.addedNodes) {
           if (n.nodeType !== 1) continue;
-          if (n.matches?.(SELECTOR_CARD)) {
-            if (n.querySelector(SELECTOR_AD)) {
-              n.style.display = "none";
-              n.__ytAdHidden = true;
-            }
+          if (n.matches?.(HIDE_SEL)) {
+            n.style.display = "none";
           } else {
-            hideAdCards(n);
+            hideAdStuff(n);
           }
         }
     });
     mo.observe(target, { childList: true, subtree: true });
+
     document.addEventListener("yt-navigate-finish", () => {
-      hideAdCards();
+      hideAdStuff();
       const pa = document.getElementById("player-ads");
       if (pa) pa.style.display = "none";
     });
@@ -215,7 +239,7 @@
       HS_CALL_PER_AD = false;
       videoEl = getVideo();
       userSpeedBeforePod = (videoEl && videoEl.playbackRate) || 1.0;
-      // only toast once per ad (4s auto-hide)
+      // Only toast once per ad (4s auto-hide)
       showHammerToast();
     }
     videoEl = getVideo();
@@ -236,7 +260,7 @@
     }
   }
 
-  // ===== HS: arm -> click -> disarm (no toasts here) =====
+  // ===== HS: arm -> click -> disarm (silent) =====
   const _beacons = [];
   const ping = (url) => {
     const i = new Image();
@@ -277,7 +301,7 @@
     return ok;
   }
 
-  // real-key hijack (silent)
+  // Real-key hijack (silent)
   function keyHijack(e) {
     if (!handlingAd || !isAdShowing()) return;
     if (e.key !== "Enter" && e.key !== " ") return;
@@ -295,7 +319,7 @@
 
     while (isAdShowing()) {
       enterAdPodIfNeeded();
-      hideAdCards();
+      hideAdStuff();
 
       const v = getVideo();
       if (!(v && !v.paused && v.readyState >= 2)) {
@@ -324,7 +348,7 @@
   function tick() {
     const p = getPlayer();
     if (p && p !== playerEl) playerEl = p;
-    hideAdCards();
+    hideAdStuff();
     if (isAdShowing()) {
       if (!handlingAd) {
         handleAd().catch((err) => {
@@ -348,7 +372,7 @@
   function boot() {
     playerEl = getPlayer();
     videoEl = getVideo();
-    hideAdCards();
+    hideAdStuff();
     observeFeed();
     tick();
   }
@@ -358,7 +382,7 @@
     document.removeEventListener("keydown", keyHijack, true);
     handlingAd = false;
     HS_CALL_PER_AD = false;
-    hideAdCards();
+    hideAdStuff();
   });
   boot();
 })();
