@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         A1 Checklist + Stopwatch (Header v3 — stable render)
+// @name         A1 Checklist + Stopwatch (Header final: top-row toggle + drag handle)
 // @namespace    https://p00key.tools
-// @version      1.8
-// @description  Compact 3-line header (timer + buttons; marks bar; questions bar), checklist with lap-on-check, glass UI, tools, and chime.
+// @version      1.9
+// @description  Compact 3-line header (timer + buttons on row 1; marks/questions bars rows 2/3), grip-drag, lap-on-check, glass UI, tools, and chime.
 // @match        https://canvas.sydney.edu.au/*
 // @match        https://docs.google.com/*
 // @match        https://chatgpt.com/*
@@ -14,7 +14,7 @@
   "use strict";
 
   const UI_ID = "a1-checklist-overlay";
-  const STORAGE_KEY = "a1_checklist_progress_v8";
+  const STORAGE_KEY = "a1_checklist_progress_v9";
   const TOTAL_QUESTIONS_TARGET = 38;
 
   // --- sound ---
@@ -195,7 +195,7 @@
     },
   ];
 
-  // --- state helpers ---
+  // --- state ---
   const loadState = () => {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
@@ -226,10 +226,10 @@
       0
     );
 
-  // --- styles (glass + 3-row header) ---
+  // --- styles ---
   GM_addStyle(`
     #${UI_ID}{
-      position:fixed; right:24px; bottom:24px; width:480px; max-height:80vh; z-index:2147483647;
+      position:fixed; right:24px; bottom:24px; width:420px; max-height:80vh; z-index:2147483647;
       color:#fff; background:rgba(30,30,35,0.6);
       backdrop-filter:blur(14px) saturate(120%); -webkit-backdrop-filter:blur(14px) saturate(120%);
       border:1px solid rgba(255,255,255,0.15); border-radius:18px; box-shadow:0 12px 36px rgba(0,0,0,0.4);
@@ -237,28 +237,42 @@
     }
     #${UI_ID} *{ box-sizing:border-box; }
 
+    /* HEADER: 3 rows */
     #${UI_ID} .hdr{
       display:grid; grid-template-rows:auto auto auto; gap:6px; padding:8px 10px;
       background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03));
-      border-bottom:1px solid rgba(255,255,255,.12);
-      user-select:none;
+      border-bottom:1px solid rgba(255,255,255,.12); user-select:none;
     }
+
+    /* Row 1: [grip][timer][spacer][▶][⏸][↺][⋮][˅]  — fixed columns so nothing wraps */
     #${UI_ID} .top{
-      display:grid; grid-template-columns: 1fr auto auto auto auto; column-gap:8px; align-items:center; min-width:0;
+      display:grid;
+      grid-template-columns: auto auto 1fr auto auto auto auto auto; /* 8 cols */
+      align-items:center; column-gap:8px; min-width:0;
+    }
+    #${UI_ID} .grip{
+      width:22px; height:22px; border-radius:8px; display:grid; place-items:center;
+      cursor:grab; user-select:none; background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.18);
+      font-size:12px; line-height:1; opacity:.85;
     }
     #${UI_ID} .timer{
       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-weight:700; font-size:12px;
-      padding:3px 8px; border-radius:8px; background:rgba(255,255,255,.10); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+      padding:3px 8px; border-radius:8px; background:rgba(255,255,255,.10);
+      display:inline-block; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
     }
-    #${UI_ID} .btn{ background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18); color:#fff; border-radius:9px; padding:3px 8px; font-size:12px; cursor:pointer; }
+    #${UI_ID} .btn{
+      background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18);
+      color:#fff; border-radius:9px; padding:3px 8px; font-size:12px; cursor:pointer;
+    }
     #${UI_ID} .btn:hover{ background:rgba(255,255,255,.2); }
     #${UI_ID} .tools-wrap{ position:relative; }
     #${UI_ID} .tools-toggle{ width:28px; height:26px; border-radius:8px; display:grid; place-items:center; }
-    #${UI_ID} .tools-menu{ position:absolute; right:0; top:30px; min-width:180px; background:rgba(40,40,50,.9); border:1px solid rgba(255,255,255,.18); border-radius:12px; backdrop-filter:blur(10px); overflow:hidden; display:none; }
+    #${UI_ID} .tools-menu{ position:absolute; right:0; top:30px; min-width:180px; background:rgba(40,40,50,.9); border:1px solid rgba(255,255,255,.18); border-radius:12px; backdrop-filter:blur(10px); overflow:hidden; display:none; z-index:1000000; }
     #${UI_ID} .tools-menu.show{ display:block; }
     #${UI_ID} .tools-menu button{ width:100%; text-align:left; padding:8px 10px; background:transparent; border:none; color:#fff; font-size:12px; }
     #${UI_ID} .tools-menu button:hover{ background:rgba(255,255,255,.08); }
 
+    /* Rows 2 & 3: label | bar | value */
     #${UI_ID} .line{ display:grid; grid-template-columns:auto 1fr auto; align-items:center; column-gap:10px; min-width:0; }
     #${UI_ID} .label{ font-size:12px; opacity:.9; }
     #${UI_ID} .value{ font-weight:700; font-size:12px; white-space:nowrap; }
@@ -266,6 +280,7 @@
     #${UI_ID} .hbar span{ display:block; height:100%; width:0%; background:linear-gradient(90deg,#6EE7B7,#22C55E); }
     #${UI_ID} .hbar.q span{ background:linear-gradient(90deg,#93C5FD,#3B82F6); }
 
+    /* Body + footer (kept) */
     #${UI_ID} .body{ padding:10px 12px; overflow:auto; max-height:calc(80vh - 120px); }
     #${UI_ID} .metric{ margin:6px 0 10px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:8px; }
     #${UI_ID} .metric .row{ display:flex; align-items:center; gap:10px; margin:6px 0; }
@@ -291,11 +306,10 @@
     #${UI_ID}.min .body, #${UI_ID}.min .footer{ display:none; }
   `);
 
-  // ---------- BUILD ONCE ----------
+  // --- build ---
   function buildUI() {
     if (document.getElementById(UI_ID)) return;
 
-    // root
     const root = document.createElement("div");
     root.id = UI_ID;
 
@@ -303,12 +317,20 @@
     const hdr = document.createElement("div");
     hdr.className = "hdr";
 
-    // Row 1
+    // Top row
     const top = document.createElement("div");
     top.className = "top";
+
+    const grip = document.createElement("div");
+    grip.className = "grip";
+    grip.textContent = "⋮⋮";
+
     const timer = document.createElement("div");
     timer.className = "timer";
     timer.textContent = "00:00:00";
+
+    const spacer = document.createElement("div"); // takes remaining space in grid
+
     const btnPlay = document.createElement("button");
     btnPlay.className = "btn";
     btnPlay.title = "Start";
@@ -343,9 +365,19 @@
     btnMin.className = "btn";
     btnMin.title = "Minimise";
     btnMin.textContent = "˅";
-    top.append(timer, btnPlay, btnPause, btnReset, toolsWrap, btnMin);
 
-    // Row 2 (Marks)
+    top.append(
+      grip,
+      timer,
+      spacer,
+      btnPlay,
+      btnPause,
+      btnReset,
+      toolsWrap,
+      btnMin
+    );
+
+    // Row 2: Marks
     const line1 = document.createElement("div");
     line1.className = "line";
     const l1 = document.createElement("div");
@@ -359,7 +391,7 @@
     v1.className = "value";
     line1.append(l1, bar1, v1);
 
-    // Row 3 (Questions)
+    // Row 3: Questions
     const line2 = document.createElement("div");
     line2.className = "line";
     const l2 = document.createElement("div");
@@ -379,7 +411,7 @@
     const body = document.createElement("div");
     body.className = "body";
 
-    // global metrics (kept)
+    // Global metrics (kept)
     const metrics = document.createElement("div");
     metrics.className = "metric";
     const rowMarks = document.createElement("div");
@@ -411,7 +443,7 @@
     metrics.append(rowMarks, rowQs);
     body.append(metrics);
 
-    // sections
+    // Sections
     CHECKLIST.forEach((sec) => {
       const secEl = document.createElement("div");
       secEl.className = "sec";
@@ -468,7 +500,7 @@
     root.append(hdr, body, footer);
     document.body.appendChild(root);
 
-    // ---- logic ----
+    // ---------- progress/render ----------
     function totals() {
       const all = [...root.querySelectorAll('input[type="checkbox"]')];
       const done = all.filter((cb) => cb.checked);
@@ -516,7 +548,7 @@
       updateSections();
     }
 
-    // stopwatch + estimates
+    // ---------- stopwatch + estimates ----------
     let raf = 0;
     const tick = () => {
       const s = loadState();
@@ -614,6 +646,21 @@
       updateAll();
     });
 
+    // header buttons
+    btnPlay.addEventListener("click", (e) => {
+      e.stopPropagation();
+      start();
+    });
+    btnPause.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pause();
+    });
+    btnReset.addEventListener("click", (e) => {
+      e.stopPropagation();
+      reset();
+    });
+
+    // tools
     toolsBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toolsMenu.classList.toggle("show");
@@ -665,18 +712,7 @@
       updateAll();
     });
 
-    btnPlay.addEventListener("click", (e) => {
-      e.stopPropagation();
-      start();
-    });
-    btnPause.addEventListener("click", (e) => {
-      e.stopPropagation();
-      pause();
-    });
-    btnReset.addEventListener("click", (e) => {
-      e.stopPropagation();
-      reset();
-    });
+    // minimise (collapse checklist)
     btnMin.addEventListener("click", (e) => {
       e.stopPropagation();
       root.classList.toggle("min");
@@ -685,18 +721,71 @@
       btnMin.title = min ? "Expand" : "Minimise";
     });
 
+    // drag — grip only, clamped to viewport
+    makeDraggable(root, grip);
+    function makeDraggable(panel, handle) {
+      let sx = 0,
+        sy = 0,
+        px = 0,
+        py = 0,
+        dragging = false;
+      const onDown = (e) => {
+        dragging = true;
+        handle.style.cursor = "grabbing";
+        const ev = e.touches ? e.touches[0] : e;
+        sx = ev.clientX;
+        sy = ev.clientY;
+        const r = panel.getBoundingClientRect();
+        px = r.left;
+        py = r.top;
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+        document.addEventListener("touchmove", onMove, { passive: false });
+        document.addEventListener("touchend", onUp);
+      };
+      const onMove = (e) => {
+        if (!dragging) return;
+        const ev = e.touches ? e.touches[0] : e;
+        if (e.touches) e.preventDefault();
+        const dx = ev.clientX - sx,
+          dy = ev.clientY - sy;
+        let nx = px + dx,
+          ny = py + dy;
+        const w = panel.offsetWidth,
+          h = panel.offsetHeight;
+        const vw = window.innerWidth,
+          vh = window.innerHeight;
+        nx = Math.max(8, Math.min(vw - w - 8, nx));
+        ny = Math.max(8, Math.min(vh - 40, ny));
+        panel.style.left = nx + "px";
+        panel.style.top = ny + "px";
+        panel.style.right = "auto";
+        panel.style.bottom = "auto";
+      };
+      const onUp = () => {
+        dragging = false;
+        handle.style.cursor = "grab";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.removeEventListener("touchmove", onMove);
+        document.removeEventListener("touchend", onUp);
+      };
+      handle.addEventListener("mousedown", onDown);
+      handle.addEventListener("touchstart", onDown, { passive: true });
+    }
+
     // boot
     tick();
     updateAll();
   }
 
-  // Build ASAP (and retry once in case SPA replaces DOM)
+  // Build (and retry once on SPA pages)
   function safeBuild() {
     try {
       buildUI();
     } catch (e) {
       console.error("A1 overlay error:", e);
-      setTimeout(buildUI, 250);
+      setTimeout(buildUI, 300);
     }
   }
   safeBuild();
